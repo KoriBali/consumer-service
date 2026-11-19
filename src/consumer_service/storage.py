@@ -17,18 +17,21 @@ PART_SUFFIX = ".part"
 REPLACE_ATTEMPTS = 5
 REPLACE_DELAY = 0.1
 
-_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+# request_id tanpa "_" agar `{pole_id}_{request_id}.json` selalu bisa diurai tanpa
+# ambigu: "a_b.json" hanya berarti pole "a" + request "b".
+_REQUEST_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
+_POLE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _STATUS_BY_FOLDER = {INBOX: "queued", DONE: "done", FAILED: "failed"}
 
 
-def _validate_id(value: str, name: str) -> str:
-    if not isinstance(value, str) or not _ID_RE.fullmatch(value):
-        raise ValueError(f"{name} tidak valid: hanya [A-Za-z0-9_-], 1-64 karakter")
+def _validate_id(value: str, name: str, pattern: re.Pattern[str]) -> str:
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        raise ValueError(f"{name} tidak valid: hanya {pattern.pattern}")
     return value
 
 
 def _normalize_request_id(request_id: str) -> str:
-    return _validate_id(request_id, "request_id").lower()
+    return _validate_id(request_id, "request_id", _REQUEST_ID_RE).lower()
 
 
 def ensure_dirs(root: Path) -> None:
@@ -44,7 +47,7 @@ def build_filename(request_id: str, pole_id: str | None = None) -> str:
     rid = _normalize_request_id(request_id)
     if not pole_id:
         return f"{rid}.json"
-    return f"{_validate_id(pole_id, 'pole_id')}_{rid}.json"
+    return f"{_validate_id(pole_id, 'pole_id', _POLE_ID_RE)}_{rid}.json"
 
 
 def find_existing(root: Path, request_id: str) -> str | None:

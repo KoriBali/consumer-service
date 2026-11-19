@@ -37,7 +37,7 @@ def test_build_filename_without_pole() -> None:
 
 
 def test_build_filename_with_pole() -> None:
-    assert storage.build_filename("abc_1", "P-01") == "P-01_abc_1.json"
+    assert storage.build_filename("abc-1", "P-01") == "P-01_abc-1.json"
 
 
 def test_build_filename_lowercases_request_id() -> None:
@@ -56,6 +56,28 @@ INVALID = ["", "a" * 65, "../x", "a.b", "a b", "a:b", "a\\b", "a/b", "a*b"]
 def test_build_filename_rejects_invalid_request_id(bad: str) -> None:
     with pytest.raises(ValueError):
         storage.build_filename(bad)
+
+
+@pytest.mark.parametrize("bad", ["a_b", "_ab", "ab_", "_"])
+def test_request_id_with_underscore_rejected(tmp_path: Path, bad: str) -> None:
+    with pytest.raises(ValueError):
+        storage.build_filename(bad)
+    with pytest.raises(ValueError):
+        storage.find_existing(tmp_path, bad)
+    with pytest.raises(ValueError):
+        storage.get_status(tmp_path, bad)
+
+
+def test_pole_id_with_underscore_allowed() -> None:
+    assert storage.build_filename("abc-1", "P_01") == "P_01_abc-1.json"
+
+
+def test_underscore_request_id_cannot_shadow_other_id(tmp_path: Path) -> None:
+    storage.ensure_dirs(tmp_path)
+    with pytest.raises(ValueError):
+        name = storage.build_filename("a_b")  # sebelum fix: "a_b.json"
+        storage.write_job_atomic(tmp_path, name, b"{}")
+    assert storage.find_existing(tmp_path, "b") is None
 
 
 @pytest.mark.parametrize("bad", [b for b in INVALID if b])

@@ -42,6 +42,10 @@ def headers(request_id: str | None = "req-1", **extra: str) -> dict[str, str]:
     return h
 
 
+def auth_headers(token: str = TOKEN) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def inbox(settings: Settings) -> Path:
     return settings.jobs_root / "inbox"
 
@@ -164,6 +168,62 @@ def test_413_without_file(client: TestClient, settings: Settings) -> None:
     assert inbox_files(settings) == []
 
 
+async def _call_post_raw(
+    settings: Settings, content_length: int, body: bytes
+) -> tuple[int, bool]:
+    """Panggil app lewat ASGI mentah; kembalikan (status, apakah body dibaca)."""
+    app = create_app(settings)
+    raw_headers = [
+        (k.lower().encode("latin-1"), v.encode("latin-1")) for k, v in headers().items()
+    ]
+    raw_headers.append((b"content-length", str(content_length).encode("latin-1")))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/jobs",
+        "raw_path": b"/v1/jobs",
+        "root_path": "",
+        "query_string": b"",
+        "headers": raw_headers,
+        "client": ("127.0.0.1", 1234),
+        "server": ("t", 80),
+    }
+    body_read = False
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        nonlocal body_read
+        body_read = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    await app(scope, receive, send)
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    return int(start["status"]), body_read  # type: ignore[call-overload]
+
+
+@pytest.mark.asyncio
+async def test_413_from_content_length_before_body_read(settings: Settings) -> None:
+    storage.ensure_dirs(settings.jobs_root)
+    status, body_read = await _call_post_raw(settings, MAX_BODY + 1, b"{}")
+    assert status == 413
+    assert body_read is False
+    assert inbox_files(settings) == []
+
+
+@pytest.mark.asyncio
+async def test_content_length_at_limit_reads_body(settings: Settings) -> None:
+    storage.ensure_dirs(settings.jobs_root)
+    status, body_read = await _call_post_raw(settings, 2, b"{}")
+    assert status == 201
+    assert body_read is True
+
+
 def test_body_exactly_at_limit_accepted(client: TestClient) -> None:
     body = b'{"x": "' + b"a" * (MAX_BODY - 9) + b'"}'
     assert len(body) == MAX_BODY
@@ -218,6 +278,23 @@ def test_empty_pole_id_ignored(client: TestClient, settings: Settings) -> None:
     assert r.json()["file"] == "req-1.json"
 
 
+def test_post_response_request_id_normalized(
+    client: TestClient, settings: Settings
+) -> None:
+    r1 = client.post("/v1/jobs", content=b"{}", headers=headers("Smoke-1"))
+    assert r1.status_code == 201
+    assert r1.json()["request_id"] == "smoke-1"
+    assert r1.json()["file"] == "smoke-1.json"
+
+    r2 = client.post("/v1/jobs", content=b"{}", headers=headers("SMOKE-1"))
+    assert r2.status_code == 200
+    assert r2.json()["request_id"] == "smoke-1"
+
+    r3 = client.get("/v1/jobs/SMOKE-1", headers=auth_headers())
+    assert r3.status_code == 200
+    assert r3.json() == {"request_id": "smoke-1", "status": "queued"}
+
+
 # --- POST: bersamaan -------------------------------------------------------
 
 
@@ -260,22 +337,42 @@ def test_get_status(
     client: TestClient, settings: Settings, folder: str, status: str
 ) -> None:
     (settings.jobs_root / folder / "P1_req-9.json").write_bytes(b"{}")
-    r = client.get("/v1/jobs/req-9")
+    r = client.get("/v1/jobs/req-9", headers=auth_headers())
     assert r.status_code == 200
     assert r.json() == {"request_id": "req-9", "status": status}
 
 
 def test_get_status_unknown(client: TestClient) -> None:
-    r = client.get("/v1/jobs/req-404")
+    r = client.get("/v1/jobs/req-404", headers=auth_headers())
     assert r.status_code == 200
     assert r.json() == {"request_id": "req-404", "status": "unknown"}
 
 
 @pytest.mark.parametrize("bad", ["a_b", "a" * 65, "a.b"])
 def test_get_status_invalid_id(client: TestClient, bad: str) -> None:
-    r = client.get(f"/v1/jobs/{bad}")
+    r = client.get(f"/v1/jobs/{bad}", headers=auth_headers())
     assert r.status_code == 400
     assert "error" in r.json()
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [None, "Bearer wrong-token", f"Basic {TOKEN}", TOKEN, "Bearer", "Bearer "],
+)
+def test_get_status_401(
+    client: TestClient, settings: Settings, auth: str | None
+) -> None:
+    (settings.jobs_root / "inbox" / "req-9.json").write_bytes(b"{}")
+    h = {} if auth is None else {"Authorization": auth}
+    r = client.get("/v1/jobs/req-9", headers=h)
+    assert r.status_code == 401
+    assert "error" in r.json()
+    assert "status" not in r.json()
+
+
+def test_get_status_401_checked_before_400(client: TestClient) -> None:
+    r = client.get("/v1/jobs/a_b")
+    assert r.status_code == 401
 
 
 # --- /health -----------------------------------------------------------------
@@ -307,7 +404,7 @@ def test_log_contains_request_id_and_never_token(
         content=b"{}",
         headers=headers("log-unauth", Authorization=f"Bearer {TOKEN}-wrong"),
     )
-    client.get("/v1/jobs/log-ok")
+    client.get("/v1/jobs/log-ok", headers=auth_headers())
 
     for rid in ("log-ok", "log-bad", "log-unauth"):
         lines = [r.getMessage() for r in caplog.records if rid in r.getMessage()]

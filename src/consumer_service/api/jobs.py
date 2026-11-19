@@ -25,6 +25,16 @@ def _log_id(value: str | None) -> str:
     return repr(value[:80])
 
 
+def _content_length(value: str | None) -> int | None:
+    """Nilai header Content-Length, atau None bila tidak ada/tidak valid."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 @router.post("/v1/jobs")
 async def create_job(request: Request) -> JSONResponse:
     settings: Settings = request.app.state.settings
@@ -48,7 +58,21 @@ async def create_job(request: Request) -> JSONResponse:
         logger.warning("request_id=%s pole_id=%s 400 %s", log_id, _log_id(pole_id), exc)
         return _error(400, str(exc))
 
-    # 3) ukuran
+    # request_id sudah tervalidasi oleh build_filename; pakai bentuk ternormalisasi
+    request_id = (request_id or "").lower()
+
+    # 3) ukuran: tolak dari Content-Length sebelum body dibaca, lalu cek ulang
+    #    setelah dibaca untuk request tanpa Content-Length.
+    declared = _content_length(request.headers.get("content-length"))
+    if declared is not None and declared > settings.max_body_bytes:
+        logger.warning(
+            "request_id=%s 413 content-length %d > %d",
+            request_id,
+            declared,
+            settings.max_body_bytes,
+        )
+        return _error(413, f"body melebihi {settings.max_body_bytes} byte")
+
     body = await request.body()
     if len(body) > settings.max_body_bytes:
         logger.warning(
@@ -97,10 +121,16 @@ async def create_job(request: Request) -> JSONResponse:
 @router.get("/v1/jobs/{request_id}")
 async def get_job(request_id: str, request: Request) -> JSONResponse:
     settings: Settings = request.app.state.settings
+    if not is_authorized(request.headers.get("authorization"), settings.consumer_token):
+        logger.warning(
+            "request_id=%s 401 token salah atau tidak ada", _log_id(request_id)
+        )
+        return _error(401, "unauthorized")
     try:
         status = storage.get_status(settings.jobs_root, request_id)
     except ValueError as exc:
         logger.warning("request_id=%s 400 %s", _log_id(request_id), exc)
         return _error(400, str(exc))
+    request_id = request_id.lower()
     logger.info("request_id=%s status=%s", request_id, status)
     return JSONResponse(content={"request_id": request_id, "status": status})

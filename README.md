@@ -23,5 +23,17 @@ nama = {pole_id}_{request_id}.json atau {request_id}.json
 - uv run python tools/vba_sim.py   # simulasi VBA di Linux
 - uv run pytest
 
+## Simulator VBA (tools/vba_sim.py)
+Meniru VBA untuk uji end-to-end di Linux: ambil file *.json tertua di inbox,
+pindahkan ke done/ (default) atau failed/ dengan nama yang sama, cetak namanya.
+JOBS_ROOT dibaca dari --root, env JOBS_ROOT, atau .env. Hanya library standar.
+
+    uv run python tools/vba_sim.py              # file tertua -> done
+    uv run python tools/vba_sim.py --fail       # file tertua -> failed
+    uv run python tools/vba_sim.py --all        # semua file di inbox -> done
+    uv run python tools/vba_sim.py --root /home/dev/inventor-jobs
+
+Setelah dipindah, GET /v1/jobs/{request_id} membalas done atau failed.
+
 ## Referensi
 PRD — Integrasi Parameter Pole: Producer-Service & Consumer-Service

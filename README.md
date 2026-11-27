@@ -18,6 +18,14 @@ nama = {pole_id}_{request_id}.json atau {request_id}.json
 - VBA hanya membaca *.json di inbox.
 - VBA memindahkan file ke done/ atau failed/ dengan NAMA YANG SAMA.
 
+## Daftar job per status
+GET /v1/jobs?status=queued|done|failed&limit=N   (token sama dengan endpoint lain)
+- count = jumlah seluruh job berstatus itu; jobs = paling banyak N job terlama
+  (default 100, maks 1000, limit=0 = jumlah saja).
+- received_at (UTC) = waktu file masuk inbox; tidak berubah saat VBA memindahkan file.
+- age_seconds dihitung dari jam consumer.
+- *.json yang namanya tidak sesuai pola dilewati dan dicatat WARNING di log.
+
 ## Perintah
 - uv run python -m consumer_service
 - uv run python tools/vba_sim.py   # simulasi VBA di Linux

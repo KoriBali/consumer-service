@@ -31,6 +31,29 @@ GET /v1/jobs?status=queued|done|failed&limit=N   (token sama dengan endpoint lai
 - uv run python tools/vba_sim.py   # simulasi VBA di Linux
 - uv run pytest
 
+## Menjalankan di Windows (PC Inventor)
+1. Salin .env.example ke .env, lalu isi dengan path bergaris miring biasa:
+
+       JOBS_ROOT=C:/InventorJobs
+       LOG_DIR=C:/InventorJobs/logs
+       CONSUMER_TOKEN=<sama dengan producer>
+
+2. Izinkan port 8100 (TCP masuk) di Windows Firewall agar producer bisa menjangkau.
+3. Jalankan dari PowerShell, lalu biarkan jendelanya terbuka:
+
+       uv run python -m consumer_service
+
+   Perintah ini selalu memakai satu worker; jangan jalankan lewat `uvicorn --workers N`.
+4. Cek dari mesin producer: GET http://<ip-pc-inventor>:8100/health
+   harus membalas {"status": "ok", "inbox_writable": true}.
+
+Untuk uji manual, kirim lewat `uv run producer send ...` dari producer. Jangan pakai
+curl di PowerShell, karena tanda kutip pada body JSON hilang dan consumer membalas
+400 "Expecting property name enclosed in double quotes".
+
+Aturan untuk macro VBA (baca UTF-8, pindah ke done/failed dengan nama sama):
+lihat SERAH-TERIMA-VBA.md di folder induk.
+
 ## Simulator VBA (tools/vba_sim.py)
 Meniru VBA untuk uji end-to-end di Linux: ambil file *.json tertua di inbox,
 pindahkan ke done/ (default) atau failed/ dengan nama yang sama, cetak namanya.

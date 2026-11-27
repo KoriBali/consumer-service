@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import re
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -12,6 +14,10 @@ from consumer_service.security import is_authorized
 logger = logging.getLogger("consumer_service.jobs")
 
 router = APIRouter()
+
+DEFAULT_LIST_LIMIT = 100
+MAX_LIST_LIMIT = 1000
+_LIMIT_RE = re.compile(r"[0-9]{1,4}")
 
 
 def _error(status_code: int, message: str) -> JSONResponse:
@@ -33,6 +39,15 @@ def _content_length(value: str | None) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _parse_limit(value: str | None) -> int:
+    """Query `limit`: bilangan 0..MAX_LIST_LIMIT, default DEFAULT_LIST_LIMIT."""
+    if value is None:
+        return DEFAULT_LIST_LIMIT
+    if not _LIMIT_RE.fullmatch(value) or int(value) > MAX_LIST_LIMIT:
+        raise ValueError(f"limit harus bilangan 0..{MAX_LIST_LIMIT}")
+    return int(value)
 
 
 @router.post("/v1/jobs")
@@ -134,3 +149,42 @@ async def get_job(request_id: str, request: Request) -> JSONResponse:
     request_id = request_id.lower()
     logger.info("request_id=%s status=%s", request_id, status)
     return JSONResponse(content={"request_id": request_id, "status": status})
+
+
+@router.get("/v1/jobs")
+async def list_jobs(request: Request) -> JSONResponse:
+    """Daftar job per status, dibaca dari folder. Hanya membaca, tanpa lock.
+
+    `count` adalah jumlah seluruh job berstatus itu; `jobs` berisi paling banyak
+    `limit` job terlama. `limit=0` dipakai untuk meminta jumlahnya saja.
+    """
+    settings: Settings = request.app.state.settings
+    if not is_authorized(request.headers.get("authorization"), settings.consumer_token):
+        logger.warning("request_id=- 401 token salah atau tidak ada (daftar job)")
+        return _error(401, "unauthorized")
+    status = request.query_params.get("status", "")
+    try:
+        limit = _parse_limit(request.query_params.get("limit"))
+        jobs, skipped = await asyncio.to_thread(
+            storage.list_jobs, settings.jobs_root, status
+        )
+    except ValueError as exc:
+        logger.warning("request_id=- 400 daftar job: %s", exc)
+        return _error(400, str(exc))
+    for name in skipped:
+        logger.warning(
+            "request_id=- nama file tidak sesuai pola, dilewati: %s", _log_id(name)
+        )
+    now = datetime.now(UTC)
+    items = [
+        {
+            "request_id": job.request_id,
+            "pole_id": job.pole_id,
+            "file": job.file,
+            "received_at": job.received_at.isoformat(timespec="seconds"),
+            "age_seconds": max(0, int((now - job.received_at).total_seconds())),
+        }
+        for job in jobs[:limit]
+    ]
+    logger.info("request_id=- daftar job status=%s count=%d", status, len(jobs))
+    return JSONResponse(content={"status": status, "count": len(jobs), "jobs": items})

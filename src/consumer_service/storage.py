@@ -5,7 +5,10 @@ Semua fungsi menerima ``root`` sebagai argumen; modul ini tidak membaca Settings
 
 import os
 import re
+import stat
 import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 INBOX = "inbox"
@@ -22,6 +25,19 @@ REPLACE_DELAY = 0.1
 _REQUEST_ID_RE = re.compile(r"[A-Za-z0-9-]{1,64}")
 _POLE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _STATUS_BY_FOLDER = {INBOX: "queued", DONE: "done", FAILED: "failed"}
+_FOLDER_BY_STATUS = {status: folder for folder, status in _STATUS_BY_FOLDER.items()}
+LIST_STATUSES = tuple(_FOLDER_BY_STATUS)
+JOB_SUFFIX = ".json"
+
+
+@dataclass(frozen=True)
+class JobEntry:
+    """Satu file job di inbox, done, atau failed."""
+
+    request_id: str
+    pole_id: str | None
+    file: str
+    received_at: datetime
 
 
 def _validate_id(value: str, name: str, pattern: re.Pattern[str]) -> str:
@@ -95,3 +111,57 @@ def get_status(root: Path, request_id: str) -> str:
     if location is None:
         return "unknown"
     return _STATUS_BY_FOLDER[location]
+
+
+def parse_filename(name: str) -> tuple[str, str | None] | None:
+    """(request_id, pole_id) dari nama file job, atau None bila tidak sesuai pola.
+
+    Kebalikan build_filename. Dipisah di "_" terakhir: request_id tidak pernah
+    memuat "_", sedangkan pole_id boleh.
+    """
+    if not name.endswith(JOB_SUFFIX):
+        return None
+    pole_id, sep, request_id = name.removesuffix(JOB_SUFFIX).rpartition("_")
+    if not _REQUEST_ID_RE.fullmatch(request_id) or request_id != request_id.lower():
+        return None
+    if not sep:
+        return request_id, None
+    if not _POLE_ID_RE.fullmatch(pole_id):
+        return None
+    return request_id, pole_id
+
+
+def list_jobs(root: Path, status: str) -> tuple[list[JobEntry], list[str]]:
+    """Daftar job berstatus `status`, terlama dulu, plus nama file yang dilewati.
+
+    received_at = waktu modifikasi file, yaitu saat consumer menulisnya ke inbox.
+    Memindahkan file (seperti yang dilakukan VBA) tidak mengubah waktu ini.
+    File selain *.json diabaikan tanpa dilaporkan (mis. desktop.ini di Windows).
+    File yang hilang saat daftar dibaca, karena sedang dipindah VBA, dilewati.
+    """
+    folder_name = _FOLDER_BY_STATUS.get(status)
+    if folder_name is None:
+        raise ValueError(f"status tidak valid: pilih {', '.join(LIST_STATUSES)}")
+    folder = root / folder_name
+    jobs: list[JobEntry] = []
+    skipped: list[str] = []
+    if not folder.is_dir():
+        return jobs, skipped
+    for path in folder.iterdir():
+        if not path.name.endswith(JOB_SUFFIX):
+            continue
+        parsed = parse_filename(path.name)
+        if parsed is None:
+            skipped.append(path.name)
+            continue
+        try:
+            info = os.stat(path)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        request_id, pole_id = parsed
+        received_at = datetime.fromtimestamp(info.st_mtime, tz=UTC)
+        jobs.append(JobEntry(request_id, pole_id, path.name, received_at))
+    jobs.sort(key=lambda job: (job.received_at, job.file))
+    return jobs, sorted(skipped)

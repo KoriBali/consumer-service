@@ -429,3 +429,97 @@ def test_response_json_shape_is_json(client: TestClient) -> None:
     r = client.post("/v1/jobs", content=b"{}", headers=headers())
     assert r.headers["content-type"].startswith("application/json")
     json.loads(r.content)
+
+
+# --- GET /v1/jobs (daftar) ---------------------------------------------------
+
+
+def _post(client: TestClient, request_id: str, pole_id: str | None = None) -> None:
+    extra = {"X-Pole-ID": pole_id} if pole_id else {}
+    r = client.post("/v1/jobs", content=b"{}", headers=headers(request_id, **extra))
+    assert r.status_code == 201
+
+
+def test_list_queued_after_post(client: TestClient) -> None:
+    _post(client, "REQ-1", "P-1")
+
+    r = client.get("/v1/jobs", params={"status": "queued"}, headers=auth_headers())
+
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "queued"
+    assert data["count"] == 1
+    (job,) = data["jobs"]
+    assert job["request_id"] == "req-1"
+    assert job["pole_id"] == "P-1"
+    assert job["file"] == "P-1_req-1.json"
+    assert job["received_at"].endswith("+00:00")
+    assert 0 <= job["age_seconds"] < 60
+
+
+def test_list_done_after_move(client: TestClient, settings: Settings) -> None:
+    _post(client, "req-1")
+    (inbox(settings) / "req-1.json").rename(settings.jobs_root / "done" / "req-1.json")
+
+    queued = client.get("/v1/jobs?status=queued", headers=auth_headers()).json()
+    done = client.get("/v1/jobs?status=done", headers=auth_headers()).json()
+
+    assert queued["count"] == 0
+    assert [j["request_id"] for j in done["jobs"]] == ["req-1"]
+
+
+def test_list_limit_keeps_total_count(client: TestClient) -> None:
+    for i in range(3):
+        _post(client, f"req-{i}")
+
+    two = client.get("/v1/jobs?status=queued&limit=2", headers=auth_headers()).json()
+    zero = client.get("/v1/jobs?status=queued&limit=0", headers=auth_headers()).json()
+
+    assert two["count"] == 3 and len(two["jobs"]) == 2
+    assert zero["count"] == 3 and zero["jobs"] == []
+
+
+def test_list_401(client: TestClient) -> None:
+    r = client.get("/v1/jobs?status=queued", headers=auth_headers("salah"))
+    assert r.status_code == 401
+
+
+def test_list_401_checked_before_400(client: TestClient) -> None:
+    r = client.get("/v1/jobs?status=bukan", headers=auth_headers("salah"))
+    assert r.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "",
+        "?status=",
+        "?status=unknown",
+        "?status=queued&limit=-1",
+        "?status=queued&limit=abc",
+        "?status=queued&limit=1001",
+    ],
+)
+def test_list_400(client: TestClient, query: str) -> None:
+    r = client.get(f"/v1/jobs{query}", headers=auth_headers())
+    assert r.status_code == 400
+    assert "error" in r.json()
+
+
+def test_list_logs_skipped_name(
+    client: TestClient, settings: Settings, caplog: pytest.LogCaptureFixture
+) -> None:
+    (settings.jobs_root / "failed" / "hasil model.json").write_bytes(b"{}")
+
+    with caplog.at_level(logging.WARNING, logger="consumer_service"):
+        r = client.get("/v1/jobs?status=failed", headers=auth_headers())
+
+    assert r.json()["count"] == 0
+    assert "hasil model.json" in caplog.text
+    assert all("request_id=" in rec.getMessage() for rec in caplog.records)
+
+
+def test_single_status_route_still_works(client: TestClient) -> None:
+    _post(client, "req-1")
+    r = client.get("/v1/jobs/req-1", headers=auth_headers())
+    assert r.json() == {"request_id": "req-1", "status": "queued"}

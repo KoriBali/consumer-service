@@ -204,3 +204,120 @@ def test_replace_gives_up_after_five_attempts(
     assert len(calls) == 5
     assert list((tmp_path / "inbox").iterdir()) == []
     assert list((tmp_path / ".tmp").iterdir()) == []
+
+
+# --- daftar job --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("req-1.json", ("req-1", None)),
+        ("P-003_ysc-25-76509.json", ("ysc-25-76509", "P-003")),
+        ("P_A_req-1.json", ("req-1", "P_A")),
+        ("REQ-1.json", None),
+        ("_req-1.json", None),
+        ("P-1_.json", None),
+        ("P.1_req-1.json", None),
+        ("req-1.txt", None),
+    ],
+)
+def test_parse_filename(name: str, expected: tuple[str, str | None] | None) -> None:
+    assert storage.parse_filename(name) == expected
+
+
+@pytest.mark.parametrize("request_id", ["req-1", "ABC-9"])
+@pytest.mark.parametrize("pole_id", [None, "P-1", "P_A"])
+def test_parse_filename_reverses_build_filename(
+    request_id: str, pole_id: str | None
+) -> None:
+    name = storage.build_filename(request_id, pole_id)
+    assert storage.parse_filename(name) == (request_id.lower(), pole_id)
+
+
+def _put(root: Path, folder: str, name: str, mtime: float | None = None) -> Path:
+    path = root / folder / name
+    path.write_bytes(b"{}")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
+    return path
+
+
+def test_list_jobs_reads_folder_of_status(tmp_path: Path) -> None:
+    storage.ensure_dirs(tmp_path)
+    _put(tmp_path, "inbox", "P-1_req-1.json")
+    _put(tmp_path, "done", "req-2.json")
+    _put(tmp_path, "failed", "P-3_req-3.json")
+
+    queued, _ = storage.list_jobs(tmp_path, "queued")
+    done, _ = storage.list_jobs(tmp_path, "done")
+    failed, _ = storage.list_jobs(tmp_path, "failed")
+
+    assert [(j.request_id, j.pole_id) for j in queued] == [("req-1", "P-1")]
+    assert [(j.request_id, j.pole_id) for j in done] == [("req-2", None)]
+    assert [j.file for j in failed] == ["P-3_req-3.json"]
+
+
+def test_list_jobs_oldest_first_with_utc_time(tmp_path: Path) -> None:
+    storage.ensure_dirs(tmp_path)
+    _put(tmp_path, "inbox", "new.json", mtime=2_000_000_000)
+    _put(tmp_path, "inbox", "old.json", mtime=1_000_000_000)
+
+    jobs, _ = storage.list_jobs(tmp_path, "queued")
+
+    assert [j.request_id for j in jobs] == ["old", "new"]
+    assert jobs[0].received_at.timestamp() == 1_000_000_000
+    assert jobs[0].received_at.utcoffset() is not None
+
+
+def test_list_jobs_ignores_non_json_tmp_and_dirs(tmp_path: Path) -> None:
+    storage.ensure_dirs(tmp_path)
+    _put(tmp_path, "inbox", "desktop.ini")
+    _put(tmp_path, ".tmp", "req-9.json.part")
+    (tmp_path / "inbox" / "sub.json").mkdir()
+
+    jobs, skipped = storage.list_jobs(tmp_path, "queued")
+
+    assert jobs == []
+    assert skipped == []
+
+
+def test_list_jobs_reports_names_outside_pattern(tmp_path: Path) -> None:
+    storage.ensure_dirs(tmp_path)
+    _put(tmp_path, "done", "req-1.json")
+    _put(tmp_path, "done", "hasil model.json")
+
+    jobs, skipped = storage.list_jobs(tmp_path, "done")
+
+    assert [j.request_id for j in jobs] == ["req-1"]
+    assert skipped == ["hasil model.json"]
+
+
+def test_list_jobs_skips_file_moved_while_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage.ensure_dirs(tmp_path)
+    _put(tmp_path, "inbox", "req-1.json")
+    _put(tmp_path, "inbox", "req-2.json")
+    real_stat = os.stat
+
+    def stat_but_req1_gone(path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if Path(path).name == "req-1.json":
+            raise FileNotFoundError(path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "stat", stat_but_req1_gone)
+
+    jobs, _ = storage.list_jobs(tmp_path, "queued")
+
+    assert [j.request_id for j in jobs] == ["req-2"]
+
+
+def test_list_jobs_missing_folder_is_empty(tmp_path: Path) -> None:
+    assert storage.list_jobs(tmp_path, "done") == ([], [])
+
+
+@pytest.mark.parametrize("status", ["", "unknown", "inbox", "DONE"])
+def test_list_jobs_rejects_invalid_status(tmp_path: Path, status: str) -> None:
+    with pytest.raises(ValueError):
+        storage.list_jobs(tmp_path, status)
